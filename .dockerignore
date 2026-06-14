@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+test_media/
+*.mkv
+*.mp4
+README.md

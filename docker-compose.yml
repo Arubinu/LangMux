@@ -1,0 +1,14 @@
+services:
+  langmux:
+    build: .
+    image: langmux:latest
+    container_name: langmux
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./media:/media/Docker
+      - /media:/media/Medias # Linux
+      - C:/Users:/media/Utilisateurs # Windows
+    environment:
+      - LANGMUX_ROOT=/media
+    restart: unless-stopped
