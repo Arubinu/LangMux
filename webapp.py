@@ -41,6 +41,12 @@ SRV = {
         "interrupted": "   ⃠ E{ep:02d} interrompu",
         "orphan": "orphelin réencapsulé",
         "mkdirfail": "Impossible de créer {d} : {e}",
+        "sync_start": "   analyse sync…",
+        "sync_ok": "   sync : {offset}s  {label}",
+        "sync_low": "   sync : confiance insuffisante, ignoré",
+        "sync_skip_embedded": "   sync : ignoré (piste FR intégrée)",
+        "sync_err": "   sync : erreur ({e}), ignoré",
+        "sync_nodep": "   sync : numpy/scipy non installés, ignoré",
     },
     "en": {
         "arrow": "E{ep:02d}  →  {name}",
@@ -54,6 +60,12 @@ SRV = {
         "interrupted": "   ⃠ E{ep:02d} cancelled",
         "orphan": "orphan repackaged",
         "mkdirfail": "cannot create {d}: {e}",
+        "sync_start": "   analyzing sync…",
+        "sync_ok": "   sync: {offset}s  {label}",
+        "sync_low": "   sync: low confidence, skipped",
+        "sync_skip_embedded": "   sync: skipped (FR track embedded)",
+        "sync_err": "   sync: error ({e}), skipped",
+        "sync_nodep": "   sync: numpy/scipy not installed, skipped",
     },
 }
 
@@ -186,6 +198,33 @@ def _run_mux(job, out_path, cmd):
     return rc, stderr
 
 
+def _analyze_sync_job(job, opts, vpath, fpath, embedded):
+    """Lance l'analyse de synchronisation si demandée. Retourne sync_info ou None."""
+    if not opts.get("sync"):
+        return None
+    if embedded:
+        _log(job, M(job, "sync_skip_embedded"))
+        return None
+    try:
+        import audio_sync
+    except ImportError:
+        _log(job, M(job, "sync_nodep"))
+        return None
+    _log(job, M(job, "sync_start"))
+    try:
+        result = audio_sync.analyze(vpath, fpath)
+    except Exception as e:
+        _log(job, M(job, "sync_err", e=str(e)[:120]))
+        return None
+    if not result["reliable"]:
+        _log(job, M(job, "sync_low"))
+        return None
+    _log(job, M(job, "sync_ok",
+                offset=f"{result['offset']:+.3f}",
+                label=result["drift_label"]))
+    return result
+
+
 def run_job(job_id, directory, items, orphans, opts):
     job = jobs[job_id]
     out_dir = os.path.join(directory, opts["output_dir"])
@@ -227,10 +266,15 @@ def run_job(job_id, directory, items, orphans, opts):
             _record(job, ep, name, False, M(job, "readfail", e=e))
             continue
 
-        _log(job, M(job, "src_embedded" if L.has_embedded_french(vost["tracks"]) else "src_external"))
+        embedded = L.has_embedded_french(vost["tracks"])
+        _log(job, M(job, "src_embedded" if embedded else "src_external"))
+
+        sync_info = _analyze_sync_job(job, opts, vpath, fpath, embedded)
+
         out_path = os.path.join(out_dir, name)
         cmd = L.build_mux_cmd(out_path, L.sanitize(name[:-4]), vost, fr,
-                              opts["primary"], opts["primary"] != "fre")
+                              opts["primary"], opts["primary"] != "fre",
+                              sync_info=sync_info)
         rc, stderr = _run_mux(job, out_path, cmd)
         if rc is None:
             _log(job, M(job, "interrupted", ep=ep))
@@ -372,6 +416,7 @@ def api_merge():
         "season": int(data.get("season") or 1),
         "template": data.get("template") or "{title} S{s}E{e}",
         "primary": "fre" if data.get("primary") == "fre" else "jpn",
+        "sync": bool(data.get("sync", False)),
     }
 
     job_id = uuid.uuid4().hex[:12]
@@ -642,6 +687,11 @@ PAGE = r"""<!doctype html>
           <div><label data-i18n="outdir_label"></label><input type="text" id="outdir" value="merged"></div>
           <div style="max-width:130px"><label data-i18n="tol_label"></label><input type="number" id="tol" value="10" min="0"></div>
         </div>
+        <div style="margin-top:12px;display:flex;align-items:center;gap:9px">
+          <input type="checkbox" id="do-sync" class="chk">
+          <span class="small" data-i18n="sync_opt"></span>
+        </div>
+        <p class="note" id="syncnote" data-i18n="sync_note"></p>
       </div>
     </div>
   </section>
@@ -726,7 +776,9 @@ const I18N={
   run_prep:'Préparation…', run_running:'Fusion en cours', run_cancelling:'Annulation…',
   run_cancelled:'Annulé', run_done:'Terminé',
   run_sub_cancelled:"{ok} épisode(s) fusionné(s) avant l'arrêt", run_sub_done:'{ok} réussi(s) · {bad} échec(s)',
-  run_relaunch:'Relancer', run_inprogress:'Fusion en cours…'
+  run_relaunch:'Relancer', run_inprogress:'Fusion en cours…',
+  sync_opt:'Synchronisation automatique VF/VOSTFR (correction offset + vitesse)',
+  sync_note:'Analyse les pistes audio par corrélation croisée pour aligner le doublage sur la VO. Ajoute ~1-2 min par épisode. Nécessite numpy et scipy.'
  },
  en:{
   tagline:'Combines a <b class="jp">Japanese original</b> and a <b class="fr">French dub</b> of the same episode into one .mkv.',
@@ -765,7 +817,9 @@ const I18N={
   run_prep:'Preparing…', run_running:'Merging', run_cancelling:'Cancelling…',
   run_cancelled:'Cancelled', run_done:'Done',
   run_sub_cancelled:'{ok} episode(s) merged before stopping', run_sub_done:'{ok} done · {bad} failed',
-  run_relaunch:'Restart', run_inprogress:'Merging…'
+  run_relaunch:'Restart', run_inprogress:'Merging…',
+  sync_opt:'Auto-sync VF/VOSTFR (offset + speed correction)',
+  sync_note:'Analyses both audio tracks via cross-correlation to align the dub with the original. Adds ~1-2 min per episode. Requires numpy and scipy.'
  }
 };
 let LANG=localStorage.getItem('langmux_lang')||((navigator.language||'fr').slice(0,2)==='en'?'en':'fr');
@@ -1010,7 +1064,7 @@ async function run(){
   $('#run').disabled=true;$('#run').textContent=t('run_inprogress');
   activate('card-run');$('#card-run').scrollIntoView({behavior:'smooth',block:'start'});
   const body={directory:state.dir,output_dir:$('#outdir').value,title,season:s,template:tpl,
-    primary:state.primary,lang:LANG,items,orphans};
+    primary:state.primary,lang:LANG,items,orphans,sync:$('#do-sync').checked};
   const d=await (await fetch('/api/merge',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json();
   if(d.error){alert(d.error);$('#run').disabled=false;$('#run').textContent=t('run_btn');return;}
   state.jobId=d.job_id;poll(d.job_id);

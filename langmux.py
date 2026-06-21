@@ -262,6 +262,33 @@ def sanitize(name):
 
 
 # --------------------------------------------------------------------------- #
+#  Synchronisation audio (optionnelle, nécessite numpy + scipy)
+# --------------------------------------------------------------------------- #
+
+def _analyze_sync(vost_path, fr_path):
+  """Analyse le décalage entre la piste VO et le fichier VF.
+  Retourne le dict audio_sync ou None en cas d'erreur / module absent."""
+  try:
+    import audio_sync
+  except ImportError:
+    print(c("  [sync] numpy/scipy introuvables — pip install numpy scipy", YELL))
+    return None
+  print(f"    analyse sync… (peut prendre 1-2 min)")
+  try:
+    result = audio_sync.analyze(vost_path, fr_path)
+  except Exception as e:
+    print(c(f"    [sync] analyse échouée : {e}", YELL))
+    return None
+  tag = "OK" if result["reliable"] else c("FAIBLE CONFIANCE", YELL)
+  print(f"    sync : décalage {result['offset']:+.3f}s  "
+      f"vitesse {result['drift_label']}  [{tag}]")
+  if not result["reliable"]:
+    print(c("    -> sync ignoré (confiance insuffisante)", YELL))
+    return None
+  return result
+
+
+# --------------------------------------------------------------------------- #
 #  Programme principal
 # --------------------------------------------------------------------------- #
 
@@ -295,10 +322,11 @@ def guess_name(directory, files):
   return cand or "série"
 
 
-def build_mux_cmd(out_path, title, vost, fr, primary, sub_default):
+def build_mux_cmd(out_path, title, vost, fr, primary, sub_default, sync_info=None):
   """Construit la ligne de commande mkvmerge.
-     vost / fr = {'path':..., 'tracks':[...]}
-     primary   = 'jpn' ou 'fre'
+     vost / fr   = {'path':..., 'tracks':[...]}
+     primary     = 'jpn' ou 'fre'
+     sync_info   = dict retourné par audio_sync.analyze() ou None
   """
   argv = ["mkvmerge", "-o", out_path, "--title", title]
 
@@ -346,6 +374,12 @@ def build_mux_cmd(out_path, title, vost, fr, primary, sub_default):
            "--language", f"{fre_aid}:fre",
            "--track-name", f"{fre_aid}:Français (VF)",
            "--default-track", f"{fre_aid}:{'yes' if primary == 'fre' else 'no'}"]
+      # Correction de synchronisation via --sync de mkvmerge
+      if sync_info:
+        import audio_sync
+        flag = audio_sync.mkvmerge_sync_flag(fre_aid, sync_info)
+        if flag:
+          argv += ["--sync", flag]
     argv += [fr["path"]]
   return argv
 
@@ -401,6 +435,9 @@ def main():
   ap.add_argument("--dry-run", action="store_true", help="Affiche le plan sans fusionner")
   ap.add_argument("--process-orphans", action="store_true",
           help="Traite aussi les épisodes orphelins (réencapsule le fichier unique)")
+  ap.add_argument("--sync", action="store_true",
+          help="Détecte et corrige automatiquement le décalage audio VF/VOSTFR "
+               "(nécessite numpy + scipy ; peut prendre 1-2 min par épisode)")
   ap.add_argument("--self-test", action="store_true", help="Teste le parseur de noms")
   args = ap.parse_args()
 
@@ -607,8 +644,13 @@ def main():
           continue
       # 'force' -> on continue
 
+    sync_info = None
+    if args.sync and not has_embedded_french(p["vostfr"]["tracks"]):
+      sync_info = _analyze_sync(p["vostfr"]["path"], p["french"]["path"])
+
     cmd = build_mux_cmd(out_path, sanitize(name[:-4]),
-              p["vostfr"], p["french"], primary, sub_default)
+              p["vostfr"], p["french"], primary, sub_default,
+              sync_info=sync_info)
     res = subprocess.run(cmd, capture_output=True, text=True)
     # mkvmerge: 0 = ok, 1 = warnings (résultat utilisable), 2 = erreur
     if res.returncode == 0:
