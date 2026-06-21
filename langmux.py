@@ -123,6 +123,12 @@ def classify(filename, audio_langs=None):
     # "fr" seul est ambigu : on le considère VF faute de mieux
     return "french"
 
+  # MULTI = fichier bi-langue contenant une piste FR → c'est la source VF dans une paire
+  if {"multi", "multic", "multilang", "multivf"} & tk:
+    if audio_langs and any(l in FRA for l in audio_langs):
+      return "french"
+    return "vostfr"
+
   # Repli : on regarde la langue audio réelle
   if audio_langs:
     if any(l in JPN for l in audio_langs):
@@ -281,7 +287,8 @@ def _analyze_sync(vost_path, fr_path):
     return None
   tag = "OK" if result["reliable"] else c("FAIBLE CONFIANCE", YELL)
   print(f"    sync : décalage {result['offset']:+.3f}s  "
-      f"vitesse {result['drift_label']}  [{tag}]")
+      f"vitesse {result['drift_label']}  "
+      f"[{result.get('n_reliable', '?')}/{result.get('n_total', '?')} fenêtres fiables]  [{tag}]")
   if not result["reliable"]:
     print(c("    -> sync ignoré (confiance insuffisante)", YELL))
     return None

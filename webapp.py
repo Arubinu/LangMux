@@ -42,8 +42,8 @@ SRV = {
         "orphan": "orphelin réencapsulé",
         "mkdirfail": "Impossible de créer {d} : {e}",
         "sync_start": "   analyse sync…",
-        "sync_ok": "   sync : {offset}s  {label}",
-        "sync_low": "   sync : confiance insuffisante, ignoré",
+        "sync_ok": "   sync : {offset}s  {label}  ({n}/{total} fenêtres fiables)",
+        "sync_low": "   sync : confiance insuffisante ({n}/{total} fenêtres), ignoré",
         "sync_skip_embedded": "   sync : ignoré (piste FR intégrée utilisée)",
         "sync_err": "   sync : erreur ({e}), ignoré",
         "sync_nodep": "   sync : numpy/scipy non installés, ignoré",
@@ -63,8 +63,8 @@ SRV = {
         "orphan": "orphan repackaged",
         "mkdirfail": "cannot create {d}: {e}",
         "sync_start": "   analyzing sync…",
-        "sync_ok": "   sync: {offset}s  {label}",
-        "sync_low": "   sync: low confidence, skipped",
+        "sync_ok": "   sync: {offset}s  {label}  ({n}/{total} reliable windows)",
+        "sync_low": "   sync: low confidence ({n}/{total} windows), skipped",
         "sync_skip_embedded": "   sync: skipped (using embedded FR track)",
         "sync_err": "   sync: error ({e}), skipped",
         "sync_nodep": "   sync: numpy/scipy not installed, skipped",
@@ -144,10 +144,16 @@ def scan_dir(directory):
                 fr = b if vost is a else a
                 status = "pair"
             else:
+                is_fre = lambda x: any(l in L.FRA for l in x["alangs"])
                 if is_jpn(a) and not is_jpn(b):
                     vost, fr = a, b
                 elif is_jpn(b) and not is_jpn(a):
                     vost, fr = b, a
+                elif is_fre(a) and not is_fre(b):
+                    # a a du français mais pas b → a est la source VF
+                    vost, fr = b, a
+                elif is_fre(b) and not is_fre(a):
+                    vost, fr = a, b
                 else:
                     vost, fr = a, b
                 status = "ambiguous"
@@ -223,12 +229,14 @@ def _analyze_sync_job(job, opts, vpath, fpath, embedded, embedded_fr_mode="auto"
     except Exception as e:
         _log(job, M(job, "sync_err", e=str(e)[:120]))
         return None
+    n, total = result.get("n_reliable", 0), result.get("n_total", 0)
     if not result["reliable"]:
-        _log(job, M(job, "sync_low"))
+        _log(job, M(job, "sync_low", n=n, total=total))
         return None
     _log(job, M(job, "sync_ok",
                 offset=f"{result['offset']:+.3f}",
-                label=result["drift_label"]))
+                label=result["drift_label"],
+                n=n, total=total))
     return result
 
 

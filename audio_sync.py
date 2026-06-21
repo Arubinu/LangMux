@@ -3,9 +3,10 @@
 """
 audio_sync — Détecte l'offset et l'écart de vitesse entre deux fichiers audio/vidéo.
 
-Principe : extraction mono basse fréquence → corrélation croisée sur le signal
-commun (musique, bruitages) pour trouver le décalage. Teste également les ratios
-de framerate connus (PAL/film/NTSC) pour corriger les problèmes de vitesse.
+Analyse l'intégralité des pistes audio par fenêtres glissantes chevauchantes
+(PROBE_STEP < PROBE_LEN). Le FFT de la référence est pré-calculé une seule
+fois ; seule la fenêtre courante du doublage est transformée à chaque pas, ce qui
+garde le temps de traitement autour de 30-90 s par épisode de 24 min.
 
 Produit directement les paramètres pour le flag --sync de mkvmerge :
   --sync TID:delay_ms,stretch_up/stretch_down
@@ -20,14 +21,15 @@ from pathlib import Path
 
 import numpy as np
 from scipy import signal as sps
+from scipy.fft import rfft, irfft, next_fast_len
 from scipy.io import wavfile
 
 # ---- Paramètres d'analyse --------------------------------------------------
-SR        = 8000    # Hz — suffisant pour la corrélation sur signal commun
-N_PROBES  = 6       # fenêtres de test réparties sur la durée du doublage
-PROBE_LEN = 30.0    # secondes par fenêtre
-MARGIN    = 60.0    # secondes ignorées en début/fin (génériques, silences)
-MIN_CONF  = 8.0     # PSR minimal pour juger une fenêtre fiable
+SR         = 8000   # Hz — suffisant pour la corrélation sur signal commun
+PROBE_LEN  = 30.0   # durée (s) de chaque fenêtre d'analyse
+PROBE_STEP = 15.0   # pas (s) entre fenêtres — chevauchement 50 %
+MARGIN     = 5.0    # secondes ignorées en tout début / toute fin
+MIN_CONF   = 8.0    # PSR minimal pour retenir une fenêtre comme fiable
 
 # Ratios PAL/film/NTSC exprimés en fractions exactes.
 # up/down = facteur d'étirement à appliquer au doublage pour le recaler.
@@ -43,10 +45,11 @@ CANDIDATE_TEMPOS = [
 ]
 
 
-# ---- Cœur de l'algorithme --------------------------------------------------
+# ---- Détection de ratio de vitesse ----------------------------------------
 
 def _locate_probe(ref, probe, sr):
-  """Où la `probe` s'aligne-t-elle le mieux dans `ref` ?
+  """Où `probe` s'aligne-t-elle le mieux dans `ref` ?
+  Utilisé uniquement par _detect_tempo (appel ponctuel, pas de boucle).
   Retourne (position_en_secondes, confiance_PSR).
   """
   ref   = ref   - np.mean(ref)
@@ -59,7 +62,7 @@ def _locate_probe(ref, probe, sr):
   side  = np.concatenate([corr[:lo], corr[hi:]])
   if side.size == 0:
     return idx / sr, 0.0
-  conf = float((peak - side.mean()) / (side.std() + 1e-9))
+  conf = float((peak - float(side.mean())) / (float(side.std()) + 1e-9))
   return idx / sr, conf
 
 
@@ -69,30 +72,8 @@ def _resample(x, up, down):
   return sps.resample_poly(x, up, down).astype(np.float32)
 
 
-def _constant_offset(ref, dub, sr, n_probes, probe_len, margin):
-  """Décalage constant par sondage multi-fenêtres.
-  Retourne (offset_secondes, fiable, probes).
-  """
-  dub_dur = len(dub) / sr
-  last    = max(margin, dub_dur - margin - probe_len)
-  starts  = np.linspace(margin, last, n_probes)
-  probes  = []
-  for t_p in starts:
-    a = int(t_p * sr)
-    b = a + int(probe_len * sr)
-    if b > len(dub):
-      continue
-    pos_ref, conf = _locate_probe(ref, dub[a:b], sr)
-    probes.append((float(t_p), float(pos_ref - t_p), float(conf)))
-  good = [(t, o, c) for (t, o, c) in probes if c >= MIN_CONF]
-  if len(good) >= 2:
-    return float(np.median([o for _, o, _ in good])), True, probes
-  best = max(probes, key=lambda x: x[2]) if probes else (0.0, 0.0, 0.0)
-  return float(best[1]), False, probes
-
-
 def _detect_tempo(ref, dub, sr, probe_len=60.0):
-  """Teste les ratios de framerate connus, retourne le meilleur (up, down, ...)."""
+  """Teste les ratios de framerate connus sur une fenêtre centrale du doublage."""
   dub_dur = len(dub) / sr
   a       = int(max(0.0, dub_dur / 2 - probe_len / 2) * sr)
   probe   = dub[a:a + int(probe_len * sr)]
@@ -105,9 +86,65 @@ def _detect_tempo(ref, dub, sr, probe_len=60.0):
   return up, down, c, scores[1][0], label
 
 
-def estimate_offset(ref, dub, sr=SR, n_probes=N_PROBES,
-          probe_len=PROBE_LEN, margin=MARGIN, try_drift=True):
-  """Analyse complète : éventuel écart de vitesse, puis décalage constant.
+# ---- Scan complet par fenêtres glissantes ----------------------------------
+
+def _scan_offsets(ref, dub, sr=SR, probe_len=PROBE_LEN,
+                  step=PROBE_STEP, margin=MARGIN):
+  """Scan complet de l'intégralité du doublage par fenêtres glissantes.
+
+  Optimisation clé : le FFT de `ref` est pré-calculé une seule fois.
+  Pour chaque fenêtre du doublage, seule une petite FFT (PROBE_LEN × sr
+  échantillons) est calculée ; c'est elle qui drive le coût total.
+
+  Retourne list[(t_dub_s, offset_s, confiance_PSR)] pour toutes les fenêtres.
+  """
+  probe_samples = int(probe_len * sr)
+  valid_len     = len(ref) - probe_samples + 1
+  if valid_len <= 0:
+    return []
+
+  # Pré-calcul du FFT de la référence — exécuté une seule fois
+  n_fft   = next_fast_len(len(ref) + probe_samples - 1)
+  ref_n   = ref.astype(np.float64)
+  ref_n  -= float(ref_n.mean())
+  ref_fft = rfft(ref_n, n=n_fft)
+  guard   = max(1, int(0.5 * sr))
+
+  dub_dur = len(dub) / sr
+  t = margin
+  probes = []
+  while t + probe_len <= dub_dur - margin:
+    a = int(t * sr)
+    b = a + probe_samples
+    if b > len(dub):
+      break
+    probe  = dub[a:b].astype(np.float64)
+    probe -= float(probe.mean())
+
+    # Corrélation croisée via FFT pré-calculé de ref
+    # c_circ[k] = sum_n ref[n] * probe[(n-k) mod n_fft]
+    # Partie "valid" (probe tient entièrement dans ref) : c_circ[0:valid_len]
+    corr  = irfft(ref_fft * np.conj(rfft(probe, n=n_fft)), n=n_fft)[:valid_len]
+    idx   = int(np.argmax(corr))
+    peak  = float(corr[idx])
+    lo    = max(0, idx - guard)
+    hi    = min(valid_len, idx + guard + 1)
+    side  = np.concatenate([corr[:lo], corr[hi:]])
+    if side.size == 0:
+      t += step
+      continue
+    conf  = float((peak - float(side.mean())) / (float(side.std()) + 1e-9))
+    probes.append((float(t), float(idx / sr - t), float(conf)))
+    t += step
+
+  return probes
+
+
+# ---- Analyse principale ----------------------------------------------------
+
+def estimate_offset(ref, dub, sr=SR, probe_len=PROBE_LEN,
+                    step=PROBE_STEP, margin=MARGIN, try_drift=True):
+  """Analyse complète sur l'intégralité du signal.
 
   Paramètres
   ----------
@@ -115,14 +152,15 @@ def estimate_offset(ref, dub, sr=SR, n_probes=N_PROBES,
 
   Retourne un dict :
     offset        : décalage à appliquer (s). Positif = retarder le doublage.
-    reliable      : True si la mesure est jugée fiable.
-    drift         : True si un ratio de vitesse a été détecté.
+    delay_ms      : offset en ms (entier, prêt pour mkvmerge --sync).
+    reliable      : True si au moins 2 fenêtres dépassent MIN_CONF.
+    n_reliable    : nombre de fenêtres fiables.
+    n_total       : nombre total de fenêtres analysées.
+    drift         : True si un ratio de vitesse a été retenu.
     drift_label   : nom du ratio (ex. "PAL→NTSC (25/23.976)").
     stretch_up    : numérateur   du ratio d'étirement pour mkvmerge --sync.
-    stretch_down  : dénominateur du ratio d'étirement pour mkvmerge --sync.
-            stretch = up/down (>1 ralentit, <1 accélère).
-    delay_ms      : offset converti en ms (entier, prêt pour mkvmerge --sync).
-    probes        : liste de (t_doublage, offset, confiance).
+    stretch_down  : dénominateur du ratio d'étirement (stretch = up/down).
+    probes        : liste complète (t_dub, offset, confiance) de chaque fenêtre.
   """
   up, down, label = 1, 1, "aucune (1:1)"
   if try_drift:
@@ -130,14 +168,27 @@ def estimate_offset(ref, dub, sr=SR, n_probes=N_PROBES,
     if (u, d) != (1, 1) and best_c > MIN_CONF and best_c > 2.0 * run_c:
       up, down, label = u, d, lab
 
-  work = _resample(dub, up, down) if (up, down) != (1, 1) else dub
-  offset, reliable, probes = _constant_offset(
-    ref, work, sr, n_probes, probe_len, margin)
+  work   = _resample(dub, up, down) if (up, down) != (1, 1) else dub
+  probes = _scan_offsets(ref, work, sr, probe_len, step, margin)
+
+  good       = [(t, o, c) for (t, o, c) in probes if c >= MIN_CONF]
+  n_reliable = len(good)
+
+  if n_reliable >= 2:
+    offset, reliable = float(np.median([o for _, o, _ in good])), True
+  elif n_reliable == 1:
+    offset, reliable = good[0][1], False
+  elif probes:
+    offset, reliable = max(probes, key=lambda x: x[2])[1], False
+  else:
+    offset, reliable = 0.0, False
 
   return {
     "offset":       offset,
     "delay_ms":     int(round(offset * 1000)),
     "reliable":     reliable,
+    "n_reliable":   n_reliable,
+    "n_total":      len(probes),
     "drift":        (up, down) != (1, 1),
     "drift_label":  label,
     "stretch_up":   up,
@@ -173,27 +224,23 @@ def extract_mono(src, sr=SR):
 
 # ---- Point d'entrée principal ----------------------------------------------
 
-def analyze(ref_path, dub_path, sr=SR, n_probes=N_PROBES,
-      probe_len=PROBE_LEN, margin=MARGIN, try_drift=True):
-  """Analyse complète : extrait les pistes audio et estime l'offset.
-
+def analyze(ref_path, dub_path, sr=SR, probe_len=PROBE_LEN,
+            step=PROBE_STEP, margin=MARGIN, try_drift=True):
+  """Extrait les pistes audio et estime l'offset (scan complet).
   Retourne le même dict qu'`estimate_offset`.
   Lève RuntimeError si l'extraction audio échoue.
   """
   ref = extract_mono(ref_path, sr)
   dub = extract_mono(dub_path, sr)
-  return estimate_offset(ref, dub, sr=sr, n_probes=n_probes,
-               probe_len=probe_len, margin=margin,
-               try_drift=try_drift)
+  return estimate_offset(ref, dub, sr=sr, probe_len=probe_len,
+                         step=step, margin=margin, try_drift=try_drift)
 
 
 # ---- Formatage du flag mkvmerge --------------------------------------------
 
 def mkvmerge_sync_flag(track_id, result):
   """Génère la valeur du flag --sync pour mkvmerge.
-
-  Exemple de retour : "2:1200,3125/2997"
-  Retourne None si aucune correction n'est nécessaire.
+  Exemple : "2:1200,3125/2997". Retourne None si aucune correction n'est nécessaire.
   """
   d  = result["delay_ms"]
   up = result["stretch_up"]

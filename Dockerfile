@@ -10,7 +10,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY langmux.py webapp.py /app/
+COPY langmux.py webapp.py audio_sync.py /app/
 
 # Rend la commande `langmux` disponible dans le shell du container
 RUN install -m 0755 /app/langmux.py /usr/local/bin/langmux
