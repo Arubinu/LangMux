@@ -647,7 +647,12 @@ PAGE = r"""<!doctype html>
   .logwrap summary{cursor:pointer;color:var(--muted);font-size:12.5px;padding:8px 0}
   .log{font-family:var(--mono);font-size:12px;max-height:240px;overflow:auto;white-space:pre-wrap;margin:0 0 10px}
   .hidden{display:none}
-  @media (prefers-reduced-motion:reduce){.tile[data-state=active]{animation:none}}
+  @media (prefers-reduced-motion:reduce){.tile[data-state=active]{animation:none}.spin{animation:none}}
+  .spin{display:inline-block;width:13px;height:13px;border:2px solid var(--line);
+        border-top-color:var(--jp);border-radius:50%;animation:spin .7s linear infinite;flex-shrink:0}
+  .spin-onbtn{border-color:rgba(27,14,20,.3);border-top-color:#1b0e14}
+  .loading-row{display:flex;align-items:center;gap:8px;padding:10px;color:var(--muted);font-size:13px}
+  @keyframes spin{to{transform:rotate(360deg)}}
 </style>
 </head>
 <body>
@@ -904,10 +909,13 @@ function renderFolderInfo(d){
   $('#scan').disabled=!d.video_count;
 }
 async function browse(path){
+  const list=$('#dirs');
+  list.innerHTML='<div class="loading-row"><span class="spin"></span>'+t('analyzing')+'</div>';
+  $('#up').disabled=true;
   const r=await fetch('/api/browse'+(path?('?path='+encodeURIComponent(path)):''));
   const d=await r.json();state.dir=d.path;state.lastBrowse=d;
   $('#up').disabled=!d.parent;$('#up').onclick=()=>browse(d.parent);
-  const list=$('#dirs');list.innerHTML='';
+  list.innerHTML='';
   if(!d.dirs.length){const e=ce('div','small muted');e.style.padding='8px';e.textContent=t('no_subdir');list.appendChild(e);}
   d.dirs.forEach(x=>{const b=ce('button','diritem');b.innerHTML='<span class="ico">▸</span>'+esc(x.name);
     b.onclick=()=>browse(x.path);list.appendChild(b);});
@@ -917,7 +925,8 @@ $('#scan').onclick=scan;
 
 /* ---- 2. Analyse ---- */
 async function scan(){
-  $('#scan').disabled=true;$('#scan').textContent=t('analyzing');
+  $('#scan').disabled=true;
+  $('#scan').innerHTML='<span class="spin spin-onbtn"></span> '+t('analyzing');
   const r=await fetch('/api/scan',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({directory:state.dir})});
   const d=await r.json();
