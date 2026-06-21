@@ -368,6 +368,14 @@ def guess_name(directory, files):
   return re.sub(r"\s+", " ", cand).strip(" -_") or "série"
 
 
+def _has_chapters(path):
+  """Retourne True si le fichier possède des chapitres (mkvmerge -J)."""
+  try:
+    return bool(run_json(["mkvmerge", "-J", path]).get("chapters", []))
+  except Exception:
+    return False
+
+
 def build_mux_cmd(out_path, title, vost, fr, primary, sub_default,
                   sync_info=None, embedded_fr_mode="auto"):
   """Construit la ligne de commande mkvmerge.
@@ -416,7 +424,12 @@ def build_mux_cmd(out_path, title, vost, fr, primary, sub_default,
   # ----- Fichier VF externe -----
   if add_external_vf and fr is not None:
     fre_aid = pick_track(fr["tracks"], "audio", FRA)
-    argv += ["--no-video", "--no-subtitles", "--no-buttons", "--no-chapters"]
+    # Chapitres : si le fichier de référence n'en a pas mais le VF en a, on les importe
+    vost_has_chap = _has_chapters(vost["path"])
+    vf_has_chap   = _has_chapters(fr["path"])
+    argv += ["--no-video", "--no-subtitles", "--no-buttons"]
+    if vost_has_chap or not vf_has_chap:
+      argv += ["--no-chapters"]
     if fre_aid is not None:
       argv += ["--audio-tracks", str(fre_aid),
            "--language", f"{fre_aid}:fre",
