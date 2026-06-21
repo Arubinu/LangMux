@@ -312,14 +312,52 @@ def collect_files(directory):
 
 
 def guess_name(directory, files):
+  """Devine le titre de la série depuis les noms de fichiers.
+  Stratégie : nettoyage de chaque fichier → préfixe commun entre tous.
+  Repli sur le nom du dossier si le préfixe est trop court ou absent.
+  """
+  def _clean(name):
+    base = os.path.splitext(name)[0]
+    base = re.sub(r"[._]+", " ", base)
+    base = re.sub(r"[\[(][^\])\n]{1,40}[\])]", " ", base)    # [Group] (info)
+    base = QUALITY.sub(" ", base)
+    base = re.sub(r"\b(19|20)\d{2}\b", " ", base)             # années
+    base = re.sub(r"[Ss]\d{1,2}[\s._-]*[Ee]\d{1,4}", " ", base)  # S01E01
+    base = re.sub(r"\b[Ee]p?(?:isode)?[\s._-]*\d{1,4}\b", " ", base, flags=re.I)
+    base = re.sub(r"\b\d{1,2}x\d{1,4}\b", " ", base)          # 1x01
+    base = re.sub(r"\bsa?isons?\s*\d+|seasons?\s*\d+\b", " ", base, flags=re.I)
+    base = re.sub(r"(?<!\w)[-–—]\s*\d{1,3}(?!\d)", " ", base)  # - 01
+    base = re.sub(r"^\s*\d{1,4}[\s._-]+", " ", base)           # 01 titre
+    base = re.sub(
+      r"\b(vostfr|vosta?|vost|french|truefrench|multi|vff?[qi2]?|vf\d?|"
+      r"integrale?|subbed?|vo|jpn|jap|japonais)\b", " ", base, flags=re.I)
+    return re.sub(r"\s+", " ", base).strip(" -_–—")
+
+  cands = []
+  for f in files:
+    c = _clean(f)
+    if c and len(c) > 2:
+      cands.append(c)
+
+  if cands:
+    common = cands[0].split()
+    for c in cands[1:]:
+      ws = c.split()
+      common = [a for a, b in zip(common, ws) if a.lower() == b.lower()]
+      if not common:
+        break
+    result = " ".join(common).strip(" -_–—")
+    if len(result) > 2:
+      return result
+
+  # Repli : nom du dossier
   cand = os.path.basename(os.path.abspath(directory))
   cand = re.sub(r"[._]+", " ", cand)
   cand = QUALITY.sub(" ", cand)
   cand = re.sub(r"[Ss]\d{1,2}([Ee]\d{1,3})?|sa?ison\s*\d+|season\s*\d+", " ", cand, flags=re.I)
   cand = re.sub(r"\b(vostfr|vost|french|truefrench|multi|vff?|integrale?)\b", " ", cand, flags=re.I)
   cand = re.sub(r"[\[\](){}]", " ", cand)
-  cand = re.sub(r"\s+", " ", cand).strip(" -_")
-  return cand or "série"
+  return re.sub(r"\s+", " ", cand).strip(" -_") or "série"
 
 
 def build_mux_cmd(out_path, title, vost, fr, primary, sub_default,
