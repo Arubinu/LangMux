@@ -836,7 +836,7 @@ const I18N={
   epcount_main:'Saison {s} : {off} épisodes officiels',
   epcount_all:' — tu as les {n} épisodes ✓', epcount_missing:' — {have} ici, {miss} manquant(s)',
   epcount_more:' — {have} paires ici',
-  tag_confirm:'à confirmer', swap_label:'Piste VF : ',
+  tag_confirm:'à confirmer', swap_label:'Audio secondaire depuis : ',
   orphan_opt:'Traiter aussi les épisodes orphelins (réencapsuler le fichier unique)',
   orphans_head:'Épisodes orphelins (une seule langue)',
   toomany:'Épisodes avec plus de 2 fichiers (ignorés) : {x}',
@@ -891,7 +891,7 @@ const I18N={
   epcount_main:'Season {s}: {off} official episodes',
   epcount_all:' — you have all {n} episodes ✓', epcount_missing:' — {have} here, {miss} missing',
   epcount_more:' — {have} pairs here',
-  tag_confirm:'to confirm', swap_label:'French track: ',
+  tag_confirm:'to confirm', swap_label:'Secondary audio from: ',
   orphan_opt:'Also process orphan episodes (repackage the single file)',
   orphans_head:'Orphan episodes (single language)',
   toomany:'Episodes with more than 2 files (ignored): {x}',
@@ -1049,6 +1049,25 @@ function renderEpCount(){
 }
 
 /* ---- 3. Plan ---- */
+function langTag(file){
+  const a=(file&&file.alangs)||[];
+  const jp=a.some(l=>['jpn','ja','jp'].includes(l));
+  const fr=a.some(l=>['fre','fra','fr'].includes(l));
+  if(jp&&fr)return{label:t('tag_multi'),cls:'tag multi',dot:'dot jp'};
+  if(jp)return{label:'JP',cls:'tag jp',dot:'dot jp'};
+  if(fr)return{label:'FR',cls:'tag fr',dot:'dot fr'};
+  return{label:(a[0]||'?').toUpperCase().slice(0,3),cls:'tag warn',dot:'dot'};
+}
+function applyLaneTags(lanes,vFile,fFile){
+  const vt=langTag(vFile),ft=langTag(fFile);
+  lanes.querySelector('[data-dot-v]').className=vt.dot;
+  lanes.querySelector('[data-tag-v]').className=vt.cls;
+  lanes.querySelector('[data-tag-v]').textContent=vt.label;
+  lanes.querySelector('[data-dot-f]').className=ft.dot;
+  lanes.querySelector('[data-tag-f]').className=ft.cls;
+  lanes.querySelector('[data-tag-f]').textContent=ft.label;
+}
+
 function buildPlan(prev){
   const plan=$('#plan');plan.innerHTML='';state.rows=[];
   state.scan.items.forEach(it=>{
@@ -1070,16 +1089,17 @@ function buildPlan(prev){
     const dw=ce('span');right.appendChild(dw);
     top.append(chk,epno,outn,right);
     const lanes=ce('div','lanes');
-    const multiTag=row.hasEmbeddedFr?'<span class="tag multi" style="margin-left:6px">'+t('tag_multi')+'</span>':'';
-    lanes.innerHTML='<div class="lane"><span class="dot jp"></span><span class="tag jp">JP</span>'+multiTag+'<span class="fn" data-v></span></div>'+
-      '<div class="lane"><span class="dot fr"></span><span class="tag fr">VF</span><span class="fn" data-f></span></div>';
+    lanes.innerHTML='<div class="lane"><span class="dot" data-dot-v></span><span class="tag" data-tag-v></span><span class="fn" data-v></span></div>'+
+      '<div class="lane"><span class="dot" data-dot-f></span><span class="tag" data-tag-f></span><span class="fn" data-f></span></div>';
     const swap=ce('div','swap');const lbl=ce('span');lbl.dataset.swap='1';lbl.textContent=t('swap_label');
     const sel=ce('select');it.files.forEach(f=>{const o=ce('option');o.value=f.name;o.textContent=f.name;sel.appendChild(o);});
     sel.value=row.french;
     sel.onchange=()=>{row.french=sel.value;row.vostfr=it.files.find(f=>f.name!==sel.value).name;
-      lanes.querySelector('[data-v]').textContent=row.vostfr;lanes.querySelector('[data-f]').textContent=row.french;};
+      lanes.querySelector('[data-v]').textContent=row.vostfr;lanes.querySelector('[data-f]').textContent=row.french;
+      applyLaneTags(lanes,it.files.find(f=>f.name===row.vostfr),it.files.find(f=>f.name===row.french));};
     swap.append(lbl,sel);
     lanes.querySelector('[data-v]').textContent=row.vostfr;lanes.querySelector('[data-f]').textContent=row.french;
+    applyLaneTags(lanes,it.files.find(f=>f.name===row.vostfr),it.files.find(f=>f.name===row.french));
     el.append(top,lanes,swap);
     // Contrôle FR intégré (visible seulement pour les fichiers MULTI)
     if(row.hasEmbeddedFr){
