@@ -30,6 +30,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import urllib.parse
 import urllib.request
 
@@ -374,6 +375,117 @@ def _has_chapters(path):
     return bool(run_json(["mkvmerge", "-J", path]).get("chapters", []))
   except Exception:
     return False
+
+
+def measure_lufs(path, stream_index=0):
+  """Mesure le niveau sonore intégrée EBU R128 (LUFS) d'un flux audio via ffmpeg.
+  Retourne float ou None si indisponible (silence, erreur, etc.).
+  """
+  proc = subprocess.run(
+    ["ffmpeg", "-i", path, "-map", f"0:a:{stream_index}",
+     "-filter:a", "loudnorm=print_format=json", "-f", "null", "-"],
+    capture_output=True, text=True,
+  )
+  m = re.search(r'"input_i"\s*:\s*"(-?[\d.]+)"', proc.stderr)
+  if not m:
+    return None
+  val = m.group(1)
+  return float(val) if val not in ("inf", "-inf") else None
+
+
+def normalize_levels(mkv_path, method="replaygain"):
+  """Normalise les niveaux audio du MKV.
+
+  method = 'replaygain' : écrit REPLAYGAIN_TRACK_GAIN via mkvpropedit (non destructif).
+           'reencode'   : réencode la piste la plus faible en AAC 192 kbps (compatible partout).
+
+  Retourne list[(track_id, lufs, gain_appliqué_dB)].
+  Ne modifie rien si la différence est < 0.5 dB.
+  Lève RuntimeError si une mesure ou l'application échoue.
+  """
+  data = run_json(["mkvmerge", "-J", mkv_path])
+  audio = [t for t in data.get("tracks", []) if t["type"] == "audio"]
+  if len(audio) < 2:
+    return []
+
+  lufs_vals = []
+  for i in range(len(audio)):
+    l = measure_lufs(mkv_path, i)
+    if l is None:
+      raise RuntimeError(f"mesure impossible pour la piste audio {i}")
+    lufs_vals.append(l)
+
+  target = max(lufs_vals)
+
+  results = []
+  adjustments = []  # (audio_index, gain_db, track_uid)
+  for i, t in enumerate(audio):
+    gain = target - lufs_vals[i]
+    results.append((t["id"], lufs_vals[i], gain if abs(gain) >= 0.5 else 0.0))
+    if abs(gain) >= 0.5:
+      adjustments.append((i, gain, t["properties"]["uid"]))
+
+  if not adjustments:
+    return results
+
+  if method == "replaygain":
+    tag_blocks = [
+      f'<Tag><Targets><TrackUID>{uid}</TrackUID></Targets>'
+      f'<Simple><Name>REPLAYGAIN_TRACK_GAIN</Name>'
+      f'<String>{gain:+.2f} dB</String></Simple></Tag>'
+      for _, gain, uid in adjustments
+    ]
+    xml = ('<?xml version="1.0" encoding="UTF-8"?>'
+           '<!DOCTYPE Tags SYSTEM "matroskatags.dtd">'
+           '<Tags>' + "".join(tag_blocks) + "</Tags>")
+    fd, tmp = tempfile.mkstemp(suffix=".xml")
+    try:
+      os.write(fd, xml.encode("utf-8"))
+      os.close(fd)
+      r = subprocess.run(["mkvpropedit", mkv_path, "--tags", f"all:{tmp}"],
+                         capture_output=True, text=True)
+      if r.returncode != 0:
+        raise RuntimeError(r.stderr.strip()[:200])
+    finally:
+      try: os.unlink(tmp)
+      except OSError: pass
+
+  elif method == "reencode":
+    for audio_index, gain, _ in adjustments:
+      _reencode_audio_track(mkv_path, audio_index, gain, audio)
+
+  return results
+
+
+def _reencode_audio_track(mkv_path, audio_index, gain_db, audio_tracks):
+  """Réencode la piste audio audio_index avec le gain donné, remplace le fichier en place."""
+  import shutil
+  fd, tmp = tempfile.mkstemp(suffix=".mkv", dir=os.path.dirname(mkv_path))
+  os.close(fd)
+  try:
+    cmd = ["ffmpeg", "-y", "-i", mkv_path, "-map_metadata", "0",
+           "-map", "0", "-c:v", "copy", "-c:s", "copy"]
+    for i, t in enumerate(audio_tracks):
+      props = t.get("properties", {})
+      if i == audio_index:
+        cmd += [f"-filter:a:{i}", f"volume={gain_db}dB",
+                f"-c:a:{i}", "aac", f"-b:a:{i}", "192k"]
+      else:
+        cmd += [f"-c:a:{i}", "copy"]
+      lang = props.get("language", "und")
+      name = props.get("track_name", "")
+      cmd += [f"-metadata:s:a:{i}", f"language={lang}"]
+      if name:
+        cmd += [f"-metadata:s:a:{i}", f"title={name}"]
+    cmd.append(tmp)
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+      raise RuntimeError(r.stderr.strip()[-300:])
+    shutil.move(tmp, mkv_path)
+  except Exception:
+    try: os.unlink(tmp)
+    except OSError: pass
+    raise
 
 
 def build_mux_cmd(out_path, title, vost, fr, primary, sub_default,

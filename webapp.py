@@ -49,6 +49,10 @@ SRV = {
         "sync_nodep": "   sync : numpy/scipy non installés, ignoré",
         "src_multi_ext": "   français : piste intégrée remplacée par le fichier VF",
         "src_multi_both": "   français : piste intégrée + fichier VF externe",
+        "norm_ok": "   vol : {adj} (ReplayGain)",
+        "norm_ok_enc": "   vol : {adj} (transcodé)",
+        "norm_skip": "   vol : niveaux déjà proches, aucun ajustement",
+        "norm_err": "   vol : normalisation impossible ({e}), ignoré",
     },
     "en": {
         "arrow": "E{ep:02d}  →  {name}",
@@ -70,6 +74,10 @@ SRV = {
         "sync_nodep": "   sync: numpy/scipy not installed, skipped",
         "src_multi_ext": "   french: embedded track replaced by external VF file",
         "src_multi_both": "   french: embedded track + external VF file",
+        "norm_ok": "   vol: {adj} (ReplayGain)",
+        "norm_ok_enc": "   vol: {adj} (re-encoded)",
+        "norm_skip": "   vol: levels already close, no adjustment",
+        "norm_err": "   vol: normalization failed ({e}), skipped",
     },
 }
 
@@ -240,6 +248,21 @@ def _analyze_sync_job(job, opts, vpath, fpath, embedded, embedded_fr_mode="auto"
     return result
 
 
+def _normalize_job(job, out_path, method="replaygain"):
+    """Mesure les pistes audio du MKV et applique la normalisation choisie."""
+    try:
+        results = L.normalize_levels(out_path, method=method)
+        parts = [f"T{tid} {lufs:.0f}LUFS{gain:+.1f}dB"
+                 for tid, lufs, gain in results if abs(gain) >= 0.5]
+        if parts:
+            ok_key = "norm_ok_enc" if method == "reencode" else "norm_ok"
+            _log(job, M(job, ok_key, adj=" · ".join(parts)))
+        else:
+            _log(job, M(job, "norm_skip"))
+    except Exception as e:
+        _log(job, M(job, "norm_err", e=str(e)[:100]))
+
+
 def run_job(job_id, directory, items, orphans, opts):
     job = jobs[job_id]
     out_dir = os.path.join(directory, opts["output_dir"])
@@ -300,6 +323,8 @@ def run_job(job_id, directory, items, orphans, opts):
             _log(job, M(job, "interrupted", ep=ep))
             cancelled = True
             break
+        if rc in (0, 1) and opts.get("normalize"):
+            _normalize_job(job, out_path, method=opts.get("norm_method", "replaygain"))
         if rc == 0:
             _record(job, ep, name, True, M(job, "merged"))
         elif rc == 1:
@@ -339,6 +364,8 @@ def run_job(job_id, directory, items, orphans, opts):
                 _log(job, M(job, "interrupted", ep=ep))
                 cancelled = True
                 break
+            if rc in (0, 1) and opts.get("normalize"):
+                _normalize_job(job, out_path, method=opts.get("norm_method", "replaygain"))
             if rc in (0, 1):
                 _record(job, ep, name, True, M(job, "orphan"))
             else:
@@ -437,6 +464,8 @@ def api_merge():
         "template": data.get("template") or "{title} S{s}E{e}",
         "primary": "fre" if data.get("primary") == "fre" else "jpn",
         "sync": bool(data.get("sync", False)),
+        "normalize": bool(data.get("normalize", False)),
+        "norm_method": data.get("norm_method") if data.get("norm_method") in ("replaygain", "reencode") else "replaygain",
     }
 
     job_id = uuid.uuid4().hex[:12]
@@ -725,6 +754,15 @@ PAGE = r"""<!doctype html>
           <span class="small" data-i18n="sync_opt"></span>
         </div>
         <p class="note" id="syncnote" data-i18n="sync_note"></p>
+        <div style="margin-top:8px;display:flex;align-items:center;gap:9px;flex-wrap:wrap">
+          <input type="checkbox" id="do-norm" class="chk">
+          <span class="small" data-i18n="norm_opt"></span>
+          <select id="norm-method" class="cls-sel hidden">
+            <option value="replaygain" data-i18n="norm_m_rg"></option>
+            <option value="reencode" data-i18n="norm_m_enc"></option>
+          </select>
+        </div>
+        <p class="note" id="normnote"></p>
       </div>
     </div>
   </section>
@@ -813,6 +851,11 @@ const I18N={
   run_relaunch:'Relancer', run_inprogress:'Fusion en cours…',
   sync_opt:'Synchronisation automatique VF/VOSTFR (correction offset + vitesse)',
   sync_note:'Analyse les pistes audio par corrélation croisée pour aligner le doublage sur la VO. Ajoute ~1-2 min par épisode. Nécessite numpy et scipy.',
+  norm_opt:'Normaliser le volume des pistes audio',
+  norm_m_rg:'ReplayGain (non destructif)',
+  norm_m_enc:'Transcodage (compatible partout)',
+  norm_note_rg:'Écrit un tag REPLAYGAIN_TRACK_GAIN — aucune perte de qualité. Requiert VLC ou mpv avec normalisation activée. Ignoré par Jellyfin en lecture directe.',
+  norm_note_enc:'Réencode la piste la plus faible en AAC 192 kbps avec gain appliqué. Compatible Jellyfin et tous les lecteurs. Perte de qualité minime (une seule génération).',
   tag_multi:'MULTI',
   swap_all:'Inverser tous',
   ph_multi_label:'Piste FR intégrée :',
@@ -863,6 +906,11 @@ const I18N={
   run_relaunch:'Restart', run_inprogress:'Merging…',
   sync_opt:'Auto-sync VF/VOSTFR (offset + speed correction)',
   sync_note:'Analyses both audio tracks via cross-correlation to align the dub with the original. Adds ~1-2 min per episode. Requires numpy and scipy.',
+  norm_opt:'Normalize audio track levels',
+  norm_m_rg:'ReplayGain (non-destructive)',
+  norm_m_enc:'Re-encode (works everywhere)',
+  norm_note_rg:'Writes a REPLAYGAIN_TRACK_GAIN tag — no quality loss. Requires VLC or mpv with normalization enabled. Ignored by Jellyfin on direct play.',
+  norm_note_enc:'Re-encodes the quieter track to AAC 192 kbps with gain applied. Works in Jellyfin and all players. Minimal quality loss (one generation).',
   tag_multi:'MULTI',
   swap_all:'Swap all',
   ph_multi_label:'Embedded FR track:',
@@ -891,7 +939,7 @@ function applyLang(lang){
 }
 function refreshDynamic(){
   if(state.lastBrowse)renderFolderInfo(state.lastBrowse);
-  setSubnote();
+  setSubnote();updateNormNote();
   if(state.scan){
     $('#scaninfo').textContent=t('scaninfo',{f:state.scan.files_count,p:state.scan.items.length});
     const prev={};state.rows.forEach(r=>prev[r.ep]={include:r.include,french:r.french});
@@ -961,6 +1009,14 @@ async function doSearch(){
 
 /* ---- audio principal ---- */
 function setSubnote(){$('#subnote').textContent=state.primary==='jpn'?t('subnote_jp'):t('subnote_fr');}
+function updateNormNote(){
+  const on=$('#do-norm').checked;
+  $('#norm-method').classList.toggle('hidden',!on);
+  $('#normnote').textContent=on?(t($('#norm-method').value==='reencode'?'norm_note_enc':'norm_note_rg')):'';
+}
+$('#do-norm').onchange=updateNormNote;
+$('#norm-method').onchange=updateNormNote;
+
 $('#primary').querySelectorAll('button').forEach(b=>{
   b.onclick=()=>{state.primary=b.dataset.v;
     $('#primary').querySelectorAll('button').forEach(x=>{x.className=''});
@@ -1189,7 +1245,8 @@ async function run(){
   $('#run').disabled=true;$('#run').textContent=t('run_inprogress');
   activate('card-run');$('#card-run').scrollIntoView({behavior:'smooth',block:'start'});
   const body={directory:state.dir,output_dir:$('#outdir').value,title,season:s,template:tpl,
-    primary:state.primary,lang:LANG,items,orphans,sync:$('#do-sync').checked};
+    primary:state.primary,lang:LANG,items,orphans,sync:$('#do-sync').checked,
+    normalize:$('#do-norm').checked,norm_method:$('#norm-method').value};
   const d=await (await fetch('/api/merge',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json();
   if(d.error){alert(d.error);$('#run').disabled=false;$('#run').textContent=t('run_btn');return;}
   state.jobId=d.job_id;poll(d.job_id);
