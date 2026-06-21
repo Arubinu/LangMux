@@ -327,14 +327,15 @@ def guess_name(directory, files):
     base = os.path.splitext(name)[0]
     base = re.sub(r"[._]+", " ", base)
     base = re.sub(r"[\[(][^\])\n]{1,40}[\])]", " ", base)    # [Group] (info)
+    # Tronquer au premier marqueur d'épisode — tout ce qui suit est du bruit
+    base = re.sub(r"\s*[Ss]\d{1,2}[\s._-]*[Ee]\d{1,4}.*$", "", base)
+    base = re.sub(r"\s*\b[Ee]p?(?:isode)?[\s._-]*\d{1,4}\b.*$", "", base, flags=re.I)
+    base = re.sub(r"\s*\b\d{1,2}x\d{1,4}\b.*$", "", base)
+    base = re.sub(r"\s*\bsa?isons?\s*\d+.*$", "", base, flags=re.I)
+    base = re.sub(r"\s*(?<!\w)[-–—]\s*\d{1,3}(?!\d).*$", "", base)
+    base = re.sub(r"^\s*\d{1,4}[\s._-]+", "", base)           # 01 titre
     base = QUALITY.sub(" ", base)
-    base = re.sub(r"\b(19|20)\d{2}\b", " ", base)             # années
-    base = re.sub(r"[Ss]\d{1,2}[\s._-]*[Ee]\d{1,4}", " ", base)  # S01E01
-    base = re.sub(r"\b[Ee]p?(?:isode)?[\s._-]*\d{1,4}\b", " ", base, flags=re.I)
-    base = re.sub(r"\b\d{1,2}x\d{1,4}\b", " ", base)          # 1x01
-    base = re.sub(r"\bsa?isons?\s*\d+|seasons?\s*\d+\b", " ", base, flags=re.I)
-    base = re.sub(r"(?<!\w)[-–—]\s*\d{1,3}(?!\d)", " ", base)  # - 01
-    base = re.sub(r"^\s*\d{1,4}[\s._-]+", " ", base)           # 01 titre
+    base = re.sub(r"\b(19|20)\d{2}\b", " ", base)
     base = re.sub(
       r"\b(vostfr|vosta?|vost|french|truefrench|multi|vff?[qi2]?|vf\d?|"
       r"integrale?|subbed?|vo|jpn|jap|japonais)\b", " ", base, flags=re.I)
