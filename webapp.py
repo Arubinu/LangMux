@@ -1252,6 +1252,7 @@ async function run(){
   state.jobId=d.job_id;poll(d.job_id);
 }
 async function poll(id){
+  if(id!==state.jobId)return;
   let d;try{d=await (await fetch('/api/status/'+id)).json();}catch(e){setTimeout(()=>poll(id),1200);return;}
   const total=d.total||1,done=d.done;setRing(Math.round(100*done/total));
   const ok=d.results.filter(x=>x.ok).length,bad=d.results.filter(x=>!x.ok).length;
