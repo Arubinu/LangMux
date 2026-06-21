@@ -322,30 +322,29 @@ def guess_name(directory, files):
   return cand or "série"
 
 
-def build_mux_cmd(out_path, title, vost, fr, primary, sub_default, sync_info=None):
+def build_mux_cmd(out_path, title, vost, fr, primary, sub_default,
+                  sync_info=None, embedded_fr_mode="auto"):
   """Construit la ligne de commande mkvmerge.
-     vost / fr   = {'path':..., 'tracks':[...]}
-     primary     = 'jpn' ou 'fre'
-     sync_info   = dict retourné par audio_sync.analyze() ou None
+     vost / fr          = {'path':..., 'tracks':[...]}
+     primary            = 'jpn' ou 'fre'
+     sync_info          = dict retourné par audio_sync.analyze() ou None
+     embedded_fr_mode   = 'auto'     → utilise le FR intégré si présent (défaut)
+                          'external' → ignore le FR intégré, utilise le fichier VF
+                          'both'     → conserve le FR intégré ET ajoute le fichier VF
   """
   argv = ["mkvmerge", "-o", out_path, "--title", title]
 
-  # ----- Sélection des pistes du fichier VOSTFR -----
-  # Piste "originale" : japonaise si tagguée, sinon 1re piste audio.
   jpn_aid = find_audio_by_lang(vost["tracks"], JPN)
   vost_fre_aid = find_audio_by_lang(vost["tracks"], FRA)
   if jpn_aid is None and vost_fre_aid is None:
-    jpn_aid = pick_track(vost["tracks"], "audio", JPN)  # repli : 1re piste audio
+    jpn_aid = pick_track(vost["tracks"], "audio", JPN)
   sub_id = pick_track(vost["tracks"], "subtitles", FRA)
-  sub_forced = (primary != "fre")   # forcés seulement si l'audio n'est pas le FR
+  sub_forced = (primary != "fre")
 
-  # Si le fichier VO contient déjà une piste française, elle est forcément
-  # synchronisée avec SA vidéo : on l'utilise et on ignore le fichier VF
-  # séparé (qui, venant d'un autre encodage, risque d'être décalé).
-  use_embedded_fr = vost_fre_aid is not None
+  # Décide quelles sources FR utiliser
+  use_embedded_fr = (vost_fre_aid is not None) and (embedded_fr_mode != "external")
+  add_external_vf = (not use_embedded_fr) or (embedded_fr_mode == "both")
 
-  # On RESTREINT explicitement les pistes audio conservées du fichier VO,
-  # pour ne pas laisser ressortir de pistes parasites (« Track 1 »).
   keep = [a for a in (jpn_aid, vost_fre_aid if use_embedded_fr else None)
       if a is not None]
   argv += ["--audio-tracks", ",".join(str(a) for a in keep)] if keep else ["--no-audio"]
@@ -355,9 +354,12 @@ def build_mux_cmd(out_path, title, vost, fr, primary, sub_default, sync_info=Non
          "--track-name", f"{jpn_aid}:Japonais",
          "--default-track", f"{jpn_aid}:{'yes' if primary == 'jpn' else 'no'}"]
   if use_embedded_fr:
+    # En mode "both", l'intégrée n'est pas la piste par défaut (la VF externe prime)
+    emb_default = "yes" if (primary == "fre" and not add_external_vf) else "no"
+    emb_label = "Français (VF intégré)" if embedded_fr_mode == "both" else "Français (VF)"
     argv += ["--language", f"{vost_fre_aid}:fre",
-         "--track-name", f"{vost_fre_aid}:Français (VF)",
-         "--default-track", f"{vost_fre_aid}:{'yes' if primary == 'fre' else 'no'}"]
+         "--track-name", f"{vost_fre_aid}:{emb_label}",
+         "--default-track", f"{vost_fre_aid}:{emb_default}"]
   if sub_id is not None:
     argv += ["--language", f"{sub_id}:fre",
          "--track-name", f"{sub_id}:Français (sous-titres)",
@@ -365,8 +367,8 @@ def build_mux_cmd(out_path, title, vost, fr, primary, sub_default, sync_info=Non
          "--forced-track", f"{sub_id}:{'yes' if sub_forced else 'no'}"]
   argv += [vost["path"]]
 
-  # ----- Fichier FRENCH : seulement si le VO n'avait pas déjà le français -----
-  if not use_embedded_fr:
+  # ----- Fichier VF externe -----
+  if add_external_vf and fr is not None:
     fre_aid = pick_track(fr["tracks"], "audio", FRA)
     argv += ["--no-video", "--no-subtitles", "--no-buttons", "--no-chapters"]
     if fre_aid is not None:
@@ -374,7 +376,6 @@ def build_mux_cmd(out_path, title, vost, fr, primary, sub_default, sync_info=Non
            "--language", f"{fre_aid}:fre",
            "--track-name", f"{fre_aid}:Français (VF)",
            "--default-track", f"{fre_aid}:{'yes' if primary == 'fre' else 'no'}"]
-      # Correction de synchronisation via --sync de mkvmerge
       if sync_info:
         import audio_sync
         flag = audio_sync.mkvmerge_sync_flag(fre_aid, sync_info)
@@ -385,8 +386,9 @@ def build_mux_cmd(out_path, title, vost, fr, primary, sub_default, sync_info=Non
 
 
 def build_single_cmd(out_path, title, src, cls, primary, sub_default):
-  """Réencapsule un fichier d'UNE seule langue (épisode orphelin) au nom
-  standard, avec étiquetage cohérent. `cls` = 'vostfr' ou 'french'."""
+  """Réencapsule un fichier orphelin au nom standard avec étiquetage cohérent.
+  cls = 'vostfr', 'french' ou 'multi' (conserve les pistes JP et FR).
+  """
   argv = ["mkvmerge", "-o", out_path, "--title", title]
   tracks = src["tracks"]
   jpn_aid = find_audio_by_lang(tracks, JPN)
@@ -395,10 +397,12 @@ def build_single_cmd(out_path, title, src, cls, primary, sub_default):
   sub_forced = (primary != "fre")
   audios = [t["id"] for t in tracks if t["type"] == "audio"]
 
-  # Aucune langue tagguée : on déduit de la classe du fichier
+  # Sans tag de langue : on déduit de la classe
   if jpn_aid is None and fre_aid is None and audios:
     if cls == "french":
       fre_aid = audios[0]
+    elif cls == "multi" and len(audios) >= 2:
+      jpn_aid, fre_aid = audios[0], audios[1]
     else:
       jpn_aid = audios[0]
 
@@ -438,6 +442,12 @@ def main():
   ap.add_argument("--sync", action="store_true",
           help="Détecte et corrige automatiquement le décalage audio VF/VOSTFR "
                "(nécessite numpy + scipy ; peut prendre 1-2 min par épisode)")
+  ap.add_argument("--embedded-fr-mode", default="auto",
+          choices=["auto", "external", "both"],
+          help="Gestion du FR intégré dans un fichier MULTI : "
+               "auto = l'utilise directement (défaut), "
+               "external = le remplace par le fichier VF, "
+               "both = conserve les deux")
   ap.add_argument("--self-test", action="store_true", help="Teste le parseur de noms")
   args = ap.parse_args()
 
@@ -644,13 +654,16 @@ def main():
           continue
       # 'force' -> on continue
 
+    efm = args.embedded_fr_mode
+    has_emb = has_embedded_french(p["vostfr"]["tracks"])
+    need_ext_vf = not has_emb or efm in ("external", "both")
     sync_info = None
-    if args.sync and not has_embedded_french(p["vostfr"]["tracks"]):
+    if args.sync and need_ext_vf:
       sync_info = _analyze_sync(p["vostfr"]["path"], p["french"]["path"])
 
     cmd = build_mux_cmd(out_path, sanitize(name[:-4]),
               p["vostfr"], p["french"], primary, sub_default,
-              sync_info=sync_info)
+              sync_info=sync_info, embedded_fr_mode=efm)
     res = subprocess.run(cmd, capture_output=True, text=True)
     # mkvmerge: 0 = ok, 1 = warnings (résultat utilisable), 2 = erreur
     if res.returncode == 0:

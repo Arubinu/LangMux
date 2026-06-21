@@ -44,9 +44,11 @@ SRV = {
         "sync_start": "   analyse sync…",
         "sync_ok": "   sync : {offset}s  {label}",
         "sync_low": "   sync : confiance insuffisante, ignoré",
-        "sync_skip_embedded": "   sync : ignoré (piste FR intégrée)",
+        "sync_skip_embedded": "   sync : ignoré (piste FR intégrée utilisée)",
         "sync_err": "   sync : erreur ({e}), ignoré",
         "sync_nodep": "   sync : numpy/scipy non installés, ignoré",
+        "src_multi_ext": "   français : piste intégrée remplacée par le fichier VF",
+        "src_multi_both": "   français : piste intégrée + fichier VF externe",
     },
     "en": {
         "arrow": "E{ep:02d}  →  {name}",
@@ -63,9 +65,11 @@ SRV = {
         "sync_start": "   analyzing sync…",
         "sync_ok": "   sync: {offset}s  {label}",
         "sync_low": "   sync: low confidence, skipped",
-        "sync_skip_embedded": "   sync: skipped (FR track embedded)",
+        "sync_skip_embedded": "   sync: skipped (using embedded FR track)",
         "sync_err": "   sync: error ({e}), skipped",
         "sync_nodep": "   sync: numpy/scipy not installed, skipped",
+        "src_multi_ext": "   french: embedded track replaced by external VF file",
+        "src_multi_both": "   french: embedded track + external VF file",
     },
 }
 
@@ -147,9 +151,11 @@ def scan_dir(directory):
                 else:
                     vost, fr = a, b
                 status = "ambiguous"
+            has_emb_fr = any(l in L.FRA for l in vost["alangs"])
             items.append({"ep": ep, "season": vost["season"] or fr["season"],
                           "status": status, "files": [a, b],
-                          "vostfr": vost["name"], "french": fr["name"]})
+                          "vostfr": vost["name"], "french": fr["name"],
+                          "has_embedded_fr": has_emb_fr})
         else:
             toomany.append({"ep": ep, "files": group})
 
@@ -198,11 +204,12 @@ def _run_mux(job, out_path, cmd):
     return rc, stderr
 
 
-def _analyze_sync_job(job, opts, vpath, fpath, embedded):
+def _analyze_sync_job(job, opts, vpath, fpath, embedded, embedded_fr_mode="auto"):
     """Lance l'analyse de synchronisation si demandée. Retourne sync_info ou None."""
     if not opts.get("sync"):
         return None
-    if embedded:
+    # Pas besoin de sync si on utilise la piste FR intégrée (déjà calée sur la vidéo)
+    if embedded and embedded_fr_mode not in ("external", "both"):
         _log(job, M(job, "sync_skip_embedded"))
         return None
     try:
@@ -267,14 +274,19 @@ def run_job(job_id, directory, items, orphans, opts):
             continue
 
         embedded = L.has_embedded_french(vost["tracks"])
-        _log(job, M(job, "src_embedded" if embedded else "src_external"))
+        efm = it.get("embedded_fr_mode", "auto")
+        if embedded:
+            src_key = {"external": "src_multi_ext", "both": "src_multi_both"}.get(efm, "src_embedded")
+        else:
+            src_key = "src_external"
+        _log(job, M(job, src_key))
 
-        sync_info = _analyze_sync_job(job, opts, vpath, fpath, embedded)
+        sync_info = _analyze_sync_job(job, opts, vpath, fpath, embedded, efm)
 
         out_path = os.path.join(out_dir, name)
         cmd = L.build_mux_cmd(out_path, L.sanitize(name[:-4]), vost, fr,
                               opts["primary"], opts["primary"] != "fre",
-                              sync_info=sync_info)
+                              sync_info=sync_info, embedded_fr_mode=efm)
         rc, stderr = _run_mux(job, out_path, cmd)
         if rc is None:
             _log(job, M(job, "interrupted", ep=ep))
@@ -578,6 +590,14 @@ PAGE = r"""<!doctype html>
   .note{font-size:12.5px;color:var(--faint);margin-top:8px}
   .bad{color:var(--bad)} .ok{color:var(--ok)} .warnc{color:var(--warn)}
 
+  .plan-hdr{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px;
+            padding:10px 12px;background:var(--surface-2);border:1px solid var(--line);border-radius:10px}
+  .plan-hdr .ph-label{font-size:12.5px;color:var(--muted);white-space:nowrap}
+  .plan-hdr .ph-sep{width:1px;background:var(--line);align-self:stretch;margin:0 4px}
+  .fr-mode{margin-top:9px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .tag.multi{color:#c47ef5;border-color:#c47ef5}
+  .cls-sel{display:inline-block;width:auto;padding:3px 7px;font-size:12px;
+           background:var(--surface);border:1px solid var(--line);color:var(--ink);border-radius:7px}
   .orphbox{margin-top:14px;border:1px dashed var(--line);border-radius:11px;padding:12px}
   .orphbox .head{display:flex;gap:9px;align-items:center;font-size:13px;color:var(--ink)}
   .orphbox .olist{margin-top:8px;display:flex;flex-direction:column;gap:4px}
@@ -699,6 +719,7 @@ PAGE = r"""<!doctype html>
   <section class="card dim" id="card-plan">
     <div class="step"><span class="n">03</span><h2 data-i18n="step3_title"></h2>
       <span class="sub" id="planinfo"></span></div>
+    <div id="plan-header"></div>
     <div class="plan" id="plan"></div>
     <div id="extras"></div>
     <div class="row" style="margin-top:16px;align-items:center">
@@ -778,7 +799,16 @@ const I18N={
   run_sub_cancelled:"{ok} épisode(s) fusionné(s) avant l'arrêt", run_sub_done:'{ok} réussi(s) · {bad} échec(s)',
   run_relaunch:'Relancer', run_inprogress:'Fusion en cours…',
   sync_opt:'Synchronisation automatique VF/VOSTFR (correction offset + vitesse)',
-  sync_note:'Analyse les pistes audio par corrélation croisée pour aligner le doublage sur la VO. Ajoute ~1-2 min par épisode. Nécessite numpy et scipy.'
+  sync_note:'Analyse les pistes audio par corrélation croisée pour aligner le doublage sur la VO. Ajoute ~1-2 min par épisode. Nécessite numpy et scipy.',
+  tag_multi:'MULTI',
+  swap_all:'Inverser tous',
+  ph_multi_label:'Piste FR intégrée :',
+  efm_auto:'FR intégré (sync garanti)',
+  efm_external:'Remplacer par le fichier VF',
+  efm_both:'Garder les deux',
+  apply_all:'Appliquer à tous',
+  orphan_cls_label:'Type :',
+  cls_vostfr:'VOSTFR',cls_french:'VF',cls_multi:'MULTI'
  },
  en:{
   tagline:'Combines a <b class="jp">Japanese original</b> and a <b class="fr">French dub</b> of the same episode into one .mkv.',
@@ -819,7 +849,16 @@ const I18N={
   run_sub_cancelled:'{ok} episode(s) merged before stopping', run_sub_done:'{ok} done · {bad} failed',
   run_relaunch:'Restart', run_inprogress:'Merging…',
   sync_opt:'Auto-sync VF/VOSTFR (offset + speed correction)',
-  sync_note:'Analyses both audio tracks via cross-correlation to align the dub with the original. Adds ~1-2 min per episode. Requires numpy and scipy.'
+  sync_note:'Analyses both audio tracks via cross-correlation to align the dub with the original. Adds ~1-2 min per episode. Requires numpy and scipy.',
+  tag_multi:'MULTI',
+  swap_all:'Swap all',
+  ph_multi_label:'Embedded FR track:',
+  efm_auto:'Embedded FR (already in sync)',
+  efm_external:'Replace with external VF',
+  efm_both:'Keep both',
+  apply_all:'Apply to all',
+  orphan_cls_label:'Type:',
+  cls_vostfr:'VOSTFR',cls_french:'VF',cls_multi:'MULTI'
  }
 };
 let LANG=localStorage.getItem('langmux_lang')||((navigator.language||'fr').slice(0,2)==='en'?'en':'fr');
@@ -942,7 +981,9 @@ function buildPlan(prev){
   state.scan.items.forEach(it=>{
     const keep=prev&&prev[it.ep];
     const row={ep:it.ep,files:it.files,vostfr:it.vostfr,french:(keep?keep.french:it.french),
-               status:it.status,include:(keep?keep.include:true)};
+               status:it.status,include:(keep?keep.include:true),
+               hasEmbeddedFr:it.has_embedded_fr||false,
+               embeddedFrMode:(keep?keep.embeddedFrMode:'auto')};
     if(row.french!==it.french){row.vostfr=it.files.find(f=>f.name!==row.french).name;}
     state.rows.push(row);
     const el=ce('div','ep'+(it.status==='ambiguous'?' amb':'')+(row.include?'':' off'));
@@ -956,7 +997,8 @@ function buildPlan(prev){
     const dw=ce('span');right.appendChild(dw);
     top.append(chk,epno,outn,right);
     const lanes=ce('div','lanes');
-    lanes.innerHTML='<div class="lane"><span class="dot jp"></span><span class="tag jp">JP</span><span class="fn" data-v></span></div>'+
+    const multiTag=row.hasEmbeddedFr?'<span class="tag multi" style="margin-left:6px">'+t('tag_multi')+'</span>':'';
+    lanes.innerHTML='<div class="lane"><span class="dot jp"></span><span class="tag jp">JP</span>'+multiTag+'<span class="fn" data-v></span></div>'+
       '<div class="lane"><span class="dot fr"></span><span class="tag fr">VF</span><span class="fn" data-f></span></div>';
     const swap=ce('div','swap');const lbl=ce('span');lbl.dataset.swap='1';lbl.textContent=t('swap_label');
     const sel=ce('select');it.files.forEach(f=>{const o=ce('option');o.value=f.name;o.textContent=f.name;sel.appendChild(o);});
@@ -965,10 +1007,64 @@ function buildPlan(prev){
       lanes.querySelector('[data-v]').textContent=row.vostfr;lanes.querySelector('[data-f]').textContent=row.french;};
     swap.append(lbl,sel);
     lanes.querySelector('[data-v]').textContent=row.vostfr;lanes.querySelector('[data-f]').textContent=row.french;
-    el.append(top,lanes,swap);plan.appendChild(el);
+    el.append(top,lanes,swap);
+    // Contrôle FR intégré (visible seulement pour les fichiers MULTI)
+    if(row.hasEmbeddedFr){
+      const fm=ce('div','fr-mode');
+      const fml=ce('span','ph-label');fml.textContent=t('ph_multi_label');
+      const fmSeg=ce('div','seg');fmSeg.style.cssText='display:inline-flex;width:auto';
+      [['auto',t('efm_auto')],['external',t('efm_external')],['both',t('efm_both')]].forEach(([v,lb])=>{
+        const b=ce('button');b.textContent=lb;b.dataset.v=v;
+        b.className=(row.embeddedFrMode===v)?'on fr':'';
+        b.onclick=()=>{row.embeddedFrMode=v;
+          fmSeg.querySelectorAll('button').forEach(x=>{x.className=x.dataset.v===v?'on fr':''});};
+        fmSeg.appendChild(b);
+      });
+      fm.append(fml,fmSeg);el.appendChild(fm);
+      row._fmSeg=fmSeg;
+    }
+    plan.appendChild(el);
     row._out=outn;row._dur=dw;
   });
-  renderExtras();refreshNames();updateSel();
+  renderPlanHeader();renderExtras();refreshNames();updateSel();
+}
+
+function renderPlanHeader(){
+  const hdr=$('#plan-header');hdr.innerHTML='';
+  if(!state.rows.length)return;
+  const ph=ce('div','plan-hdr');
+  // Bouton "Inverser tous"
+  const swBtn=ce('button','ghost');swBtn.textContent=t('swap_all');swBtn.style.fontSize='12.5px';
+  swBtn.onclick=()=>{
+    state.rows.forEach(row=>{
+      const tmp=row.french;row.french=row.vostfr;row.vostfr=tmp;
+      // Mettre à jour le select et les lanes
+      const ep=document.querySelector('.ep-top .epno');
+      // on passe par refreshNames qui relit row.vostfr/french
+    });
+    // Resync UI : reconstruire le plan en conservant les états
+    const prev={};state.rows.forEach(r=>prev[r.ep]={include:r.include,french:r.french,embeddedFrMode:r.embeddedFrMode});
+    buildPlan(prev);
+  };
+  ph.appendChild(swBtn);
+  // Contrôles "appliquer à tous" pour les épisodes MULTI
+  const multiRows=state.rows.filter(r=>r.hasEmbeddedFr);
+  if(multiRows.length){
+    const sep=ce('div','ph-sep');ph.appendChild(sep);
+    const lbl=ce('span','ph-label');lbl.textContent=t('ph_multi_label');
+    const gSel=ce('select','cls-sel');
+    [['auto',t('efm_auto')],['external',t('efm_external')],['both',t('efm_both')]].forEach(([v,lb])=>{
+      const o=ce('option');o.value=v;o.textContent=lb;gSel.appendChild(o);
+    });
+    const applyBtn=ce('button','ghost');applyBtn.textContent=t('apply_all');applyBtn.style.fontSize='12.5px';
+    applyBtn.onclick=()=>{
+      const v=gSel.value;
+      const prev={};state.rows.forEach(r=>prev[r.ep]={include:r.include,french:r.french,embeddedFrMode:r.hasEmbeddedFr?v:r.embeddedFrMode});
+      buildPlan(prev);
+    };
+    ph.append(lbl,gSel,applyBtn);
+  }
+  hdr.appendChild(ph);
 }
 
 function renderExtras(){
@@ -994,9 +1090,19 @@ function renderOrphanList(){
   const list=$('#olist');if(!list)return;list.innerHTML='';
   const title=$('#title').value||'Serie',s=parseInt($('#season').value||'1'),tpl=$('#template').value||'{title} S{s}E{e}';
   (state.scan.orphans||[]).forEach(o=>{
-    const cls=({french:'VF',vostfr:'VOSTFR'})[o.file.cls]||'?';
+    if(!state.orphanCls)state.orphanCls={};
+    if(!state.orphanCls[o.ep])state.orphanCls[o.ep]=o.file.cls||'vostfr';
     const row=ce('div','orow');
-    row.textContent='E'+String(o.ep).padStart(2,'0')+'  ['+cls+']  '+o.file.name;
+    const info=ce('span');
+    info.textContent='E'+String(o.ep).padStart(2,'0')+'  '+o.file.name;
+    const clsLbl=ce('span','ph-label');clsLbl.style.margin='0 6px 0 10px';clsLbl.textContent=t('orphan_cls_label');
+    const clsSel=ce('select','cls-sel');
+    [['vostfr',t('cls_vostfr')],['french',t('cls_french')],['multi',t('cls_multi')]].forEach(([v,lb])=>{
+      const op=ce('option');op.value=v;op.textContent=lb;clsSel.appendChild(op);
+    });
+    clsSel.value=state.orphanCls[o.ep];
+    clsSel.onchange=()=>{state.orphanCls[o.ep]=clsSel.value;};
+    row.append(info,clsLbl,clsSel);
     if(state.doOrphans){const arr=ce('span','arr');arr.textContent='   → '+fmt(tpl,title,s,o.ep)+'.mkv';row.appendChild(arr);}
     list.appendChild(row);
   });
@@ -1055,8 +1161,10 @@ function setRing(pct){$('#ringfg').setAttribute('stroke-dashoffset',Math.round(2
 async function run(){
   const title=$('#title').value||'Serie',s=parseInt($('#season').value||'1'),tpl=$('#template').value||'{title} S{s}E{e}';
   const incPairs=state.rows.filter(r=>r.include);
-  const items=incPairs.map(r=>({ep:r.ep,vostfr:r.vostfr,french:r.french}));
-  const orphans=state.doOrphans?(state.scan.orphans||[]).map(o=>({ep:o.ep,file:o.file.name,cls:o.file.cls})):[];
+  const items=incPairs.map(r=>({ep:r.ep,vostfr:r.vostfr,french:r.french,
+    embedded_fr_mode:r.embeddedFrMode||'auto'}));
+  const orphans=state.doOrphans?(state.scan.orphans||[]).map(o=>({ep:o.ep,file:o.file.name,
+    cls:(state.orphanCls&&state.orphanCls[o.ep])||o.file.cls||'vostfr'})):[];
   const tileList=incPairs.map(r=>({ep:r.ep,name:fmt(tpl,title,s,r.ep)+'.mkv',orphan:false}))
     .concat(orphans.map(o=>({ep:o.ep,name:fmt(tpl,title,s,o.ep)+'.mkv',orphan:true})));
   buildTiles(tileList);setRing(0);$('#runbig').textContent=t('run_prep');$('#runsub').textContent='';
